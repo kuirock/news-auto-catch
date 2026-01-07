@@ -2,8 +2,8 @@ name: News Scraper
 
 on:
   schedule:
-    # 日本時間の朝7時から1時間おきに実行 (UTCだと22時スタート)
-    - cron: '0 22-10 * * *' 
+    # 0時から10時(UTC) と 22時から23時(UTC) に実行
+    - cron: '0 0-10,22-23 * * *'
   workflow_dispatch: # 手動でも実行ボタンを押せるようにする
 
 jobs:
