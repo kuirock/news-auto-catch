@@ -46,11 +46,20 @@ def main():
             
             soup = BeautifulSoup(response.text, "html.parser")
             
-            # ★ 修正ポイント：カード（div）を全部探す ★
+            # ★ 修正ポイント：カードが見つからなかった時のデバッグ情報を強化 ★
             cards = soup.find_all("div", class_="card-outline")
             
             if not cards:
-                print("ニュースが見つからなくなったよ。終了！")
+                print("🚨 ニュースが見つかりません！")
+                
+                # ページのタイトルを表示してみる（これでログイン画面かどうかわかる！）
+                page_title = soup.title.string.strip() if soup.title else "タイトルなし"
+                print(f"現在のページタイトル: 【 {page_title} 】")
+                
+                if "ログイン" in page_title or "Login" in page_title:
+                    print("👉 原因: Cookieの有効期限が切れて、ログイン画面に戻されています。")
+                    print("👉 対策: ブラウザでポータルにログインし直して、新しいCookieをGitHub Secretsに設定してください！")
+                
                 break
 
             page_items = []
