@@ -2,9 +2,8 @@ name: News Scraper
 
 on:
   schedule:
-    # 0時から10時(UTC) と 22時から23時(UTC) に実行
     - cron: '0 0-10,22-23 * * *'
-  workflow_dispatch: # 手動でも実行ボタンを押せるようにする
+  workflow_dispatch:
 
 jobs:
   scrape:
@@ -22,9 +21,9 @@ jobs:
         run: |
           pip install requests beautifulsoup4 supabase
 
-      - name: ロボット起動！
+      - name: スクレイピング実行
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          PORTAL_COOKIE: ${{ secrets.PORTAL_COOKIE }}
+          PORTAL_COOKIE: ${{ secrets.PORTAL_COOKIE }} # 👈 Cookieを使う設定に戻す
         run: python main.py
