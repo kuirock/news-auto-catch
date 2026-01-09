@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 from supabase import create_client, Client
 import time
 import re
+from datetime import datetime, timezone # 👈 日付用に追加
 
 # --- 1. 設定 ---
 BASE_URL = "https://portal.do-johodai.ac.jp/articles"
@@ -19,7 +20,11 @@ def main():
 
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    # 文字列のCookieを辞書に変換
+    # ★ 今回の実行時刻を「出席スタンプ」として使うよ！
+    # (ISO形式の文字列にしておく)
+    current_run_time = datetime.now(timezone.utc).isoformat()
+    print(f"🕒 今回の実行ID (last_seen_at): {current_run_time}")
+
     cookies = {}
     for item in PORTAL_COOKIE.split(";"):
         if "=" in item:
@@ -32,6 +37,7 @@ def main():
 
     page = 1
     total_count = 0
+    is_success = True # 最後まで完了したかチェックするフラグ
 
     while True:
         current_url = f"{BASE_URL}?page={page}"
@@ -41,20 +47,18 @@ def main():
             response = requests.get(current_url, headers=headers, cookies=cookies, timeout=20)
             response.encoding = response.apparent_encoding 
             
-            # ★ ログイン画面に飛ばされてないかチェック！ ★
             soup = BeautifulSoup(response.text, "html.parser")
             page_title = soup.title.string.strip() if soup.title else ""
             
-            # Googleログイン画面やポータルのログイン画面に飛ばされていたらアウト
             if "Login" in page_title or "ログイン" in page_title or "Google" in page_title:
-                print("🚨 エラー: ログイン画面に転送されました。Cookieの有効期限が切れています！")
-                print("👉 GitHub Secrets の PORTAL_COOKIE を新しいものに更新してください。")
+                print("🚨 エラー: ログイン画面に転送されました。")
+                is_success = False # 失敗フラグ
                 break
 
             cards = soup.find_all("div", class_="card-outline")
             
             if not cards:
-                print("これ以上ニュースがないか、取得できませんでした。")
+                print("ニュースの取得が完了しました（これ以上ページがありません）。")
                 break
 
             page_items = []
@@ -86,7 +90,8 @@ def main():
                             "published_at": published_at,
                             "title": title,
                             "url": url,
-                            "category": category
+                            "category": category,
+                            "last_seen_at": current_run_time # 👈 ここで「出席スタンプ」を押す！
                         })
 
                 except Exception as e:
@@ -105,9 +110,28 @@ def main():
 
         except Exception as e:
             print(f"通信エラー: {e}")
+            is_success = False # 失敗フラグ
             break
 
-    print(f"✨ 合計 {total_count} 件処理しました")
+    # --- 🧹 お掃除タイム ---
+    # エラーなく最後まで走り切った場合だけ、削除を実行する（安全のため）
+    if is_success and total_count > 0:
+        print("🧹 削除されたニュースのお掃除を開始します...")
+        try:
+            # 「今回のスタンプ(current_run_time)を持っていない」＝「今回見つからなかった」データを削除
+            result = supabase.table("news").delete().neq("last_seen_at", current_run_time).execute()
+            # ※ neq は "Not Equal" (等しくない) の意味だよ
+            
+            # 消した数を確認（dataがリストで返ってくるはず）
+            deleted_count = len(result.data) if result.data else 0
+            print(f"✨ お掃除完了！ {deleted_count} 件の古いニュースを削除しました。")
+            
+        except Exception as e:
+            print(f"⚠️ お掃除中にエラーが発生しました（データは残ります）: {e}")
+    else:
+        print("⚠️ 途中でエラーがあったため、削除処理はスキップしました。")
+
+    print(f"🏁 全処理終了！")
 
 if __name__ == "__main__":
     main()
