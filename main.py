@@ -16,10 +16,13 @@ from selenium.common.exceptions import TimeoutException
 
 # --- 設定 ---
 TARGET_URL = "https://portal.do-johodai.ac.jp/articles"
+TOP_URL = "https://portal.do-johodai.ac.jp/top/"
+
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 PORTAL_ID = os.environ.get("PORTAL_ID")
 PORTAL_PASSWORD = os.environ.get("PORTAL_PASSWORD")
+PORTAL_COOKIE = os.environ.get("PORTAL_COOKIE") # ★追加: 手動Cookie
 
 def setup_driver():
     print("🤖 ロボットブラウザ起動中...")
@@ -29,61 +32,72 @@ def setup_driver():
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1280,1024')
-    # ロボット検知回避
     options.add_argument('--disable-blink-features=AutomationControlled') 
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
-def perform_google_login(driver, wait):
-    print("🔒 Google SSOログインプロセス開始...")
+def inject_cookies(driver):
+    if not PORTAL_COOKIE:
+        print("ℹ️ 手動Cookie (PORTAL_COOKIE) が設定されていません。通常ログインを試みます。")
+        return False
+    
+    print("🍪 手動Cookieの注入を開始します...")
+    try:
+        # Cookieをセットするには、まずそのドメインを開く必要がある（404でもいいからドメイン配下へ）
+        # ここではトップページへ一旦アクセス
+        driver.get(TOP_URL)
+        
+        # Cookie文字列 "key=value; key2=value2" を分解してセット
+        cookies = PORTAL_COOKIE.split(';')
+        for cookie in cookies:
+            if '=' in cookie:
+                name, value = cookie.strip().split('=', 1)
+                driver.add_cookie({
+                    'name': name,
+                    'value': value,
+                    'domain': 'portal.do-johodai.ac.jp',
+                    'path': '/'
+                })
+        
+        print("✅ Cookie注入完了！")
+        return True
+    except Exception as e:
+        print(f"❌ Cookie注入失敗: {e}")
+        return False
 
-    # 1. ポータルの「ログイン」ボタンをクリック
+def perform_google_login(driver, wait):
+    # (省略: さっきと同じログイン処理)
+    print("🔒 Google SSOログインプロセス開始...")
     try:
         portal_login_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'ログイン')] | //a[contains(text(), 'ログイン')]")))
-        print("👆 ポータルの【ログイン】ボタンをクリック！")
         portal_login_btn.click()
     except TimeoutException:
-        print("ℹ️ ポータルのログインボタンが見つかりません。すでにGoogle画面か、ログイン済みかも？")
+        print("ℹ️ ポータルのログインボタンが見つかりません。")
 
-    # 2. Google メールアドレス
     try:
-        print("📧 Google: メールアドレス入力待ち...")
         email_input = wait.until(EC.visibility_of_element_located((By.XPATH, "//input[@type='email']")))
         email_input.clear()
         email_input.send_keys(PORTAL_ID)
         email_input.submit()
-        print("✅ メールアドレス送信")
     except TimeoutException:
-        print("ℹ️ メールアドレス入力欄が出ませんでした（スキップ）")
+        pass
 
-    # 3. Google パスワード
     try:
-        print("🔑 Google: パスワード入力待ち...")
         password_input = wait.until(EC.visibility_of_element_located((By.XPATH, "//input[@type='password']")))
         time.sleep(1)
         password_input.clear()
         password_input.send_keys(PORTAL_PASSWORD)
         password_input.submit()
-        print("✅ パスワード送信")
     except TimeoutException:
-        print("ℹ️ パスワード入力欄が出ませんでした（スキップ）")
+        pass
 
-    # 4. 遷移待ち
-    print("⏳ ログイン処理完了待ち...")
     time.sleep(10)
-    
-    # ログイン成功判定
-    if "login" not in driver.current_url:
-        print("🎉 ログイン成功！")
-        return True
-    else:
-        print(f"⚠️ ログイン後のURLが怪しいです: {driver.current_url}")
-        return False
+    return True
 
 def login_and_scrape():
-    if not SUPABASE_URL or not SUPABASE_KEY or not PORTAL_ID or not PORTAL_PASSWORD:
-        print("❌ 設定不足: Secretsを確認してね")
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        print("❌ Supabase設定不足")
         return
 
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -94,21 +108,40 @@ def login_and_scrape():
     current_run_time = datetime.now(timezone.utc).isoformat()
     
     try:
-        wait = WebDriverWait(driver, 30) # 待ち時間を30秒に延長！
+        wait = WebDriverWait(driver, 30)
 
         # --- 1. アクセス & ログイン ---
-        print(f"🔗 ポータル({TARGET_URL})にアクセス...")
+        # ★ Cookieがあれば注入してログインスキップを狙う
+        cookie_injected = inject_cookies(driver)
+        
+        # ニュース一覧へ移動
+        print(f"🔗 ニュース一覧({TARGET_URL})へ移動...")
         driver.get(TARGET_URL)
         time.sleep(3)
 
-        # ログインが必要かチェック
-        is_portal_top = len(driver.find_elements(By.XPATH, "//button[contains(text(), 'ログイン')]")) > 0
-        if "login" in driver.current_url or "google" in driver.current_url or is_portal_top:
+        # もしログイン画面やトップページに飛ばされたら、Cookieが無効だったということなので、通常ログイン
+        current_url = driver.current_url
+        is_login_page = "login" in current_url or "google" in current_url
+        is_top_page = "/top/" in current_url # ニュースに行こうとしてトップに飛ばされた場合も失敗とみなす
+
+        if is_login_page or is_top_page:
+            print("⚠️ Cookieログインに失敗したか、有効期限切れのようです。")
+            print(f"   現在のURL: {current_url}")
+            
+            if not PORTAL_ID or not PORTAL_PASSWORD:
+                print("❌ ID/PASSがないためログインできません。終了します。")
+                return
+
+            print("🔄 通常のログインフローを実行します...")
+            if is_top_page: 
+                # トップにいるならログアウトボタンを探すか、一度ログイン画面に行く必要があるが
+                # ログインボタンがあれば押す
+                pass 
+            
             perform_google_login(driver, wait)
-        
-        # トップページにいたらニュース一覧へ移動
-        if "/top/" in driver.current_url:
-            print("↩️ トップページにいるため、ニュース一覧へ移動します...")
+            
+            # 再度ニュースへ
+            print("↩️ 再度ニュース一覧へ移動...")
             driver.get(TARGET_URL)
             time.sleep(5)
 
@@ -118,52 +151,26 @@ def login_and_scrape():
         is_success = True
 
         while True:
-            # ページ移動
             if page > 1 or "articles" not in driver.current_url:
-                current_page_url = f"{TARGET_URL}?page={page}"
-                print(f"📄 Page {page} へ移動中... ({current_page_url})")
-                driver.get(current_page_url)
+                driver.get(f"{TARGET_URL}?page={page}")
+                time.sleep(2)
             
             try:
-                # ★ 記事カードが出るまで待つ (card-outline または card)
                 wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".card-outline, .card")))
-                time.sleep(3) # 描画完了待ち
+                time.sleep(2)
             except TimeoutException:
-                print(f"⚠️ 待機しましたが記事が見つかりませんでした (Page {page})")
-                print(f"   現在のURL: {driver.current_url}")
-                print(f"   ページタイトル: {driver.title}")
-                
-                # ▼ デバッグ用: HTMLの最初の方を表示して、どんな状態か確認する
-                html_snippet = driver.page_source[:500].replace('\n', ' ')
-                print(f"   HTML抜粋: {html_snippet}...")
-
-                # ★ リトライ: 1ページ目なら一度だけリロードしてみる
+                print(f"⚠️ 記事が見つかりません (Page {page})")
+                print(f"   URL: {driver.current_url}")
                 if page == 1:
-                    print("🔄 ページをリロードして再試行します...")
-                    driver.refresh()
-                    time.sleep(5)
-                    try:
-                        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".card-outline, .card")))
-                    except:
-                        print("❌ リロードしてもダメでした。")
-                        # ログイン画面に戻されてないかチェック
-                        if "login" in driver.current_url:
-                            print("🚨 ログアウトされています。")
-                            is_success = False
-                        break
-                else:
-                    break
+                    print("❌ 1ページ目から取得できませんでした。終了。")
+                    is_success = False
+                break
 
-            # HTML解析
             soup = BeautifulSoup(driver.page_source, "html.parser")
-            # セレクタを少し広めに設定
-            cards = soup.select(".card-outline, .card")
-            
-            # カードの中身が空っぽじゃないかチェック
-            valid_cards = [c for c in cards if c.find("h3") or c.find("a")]
+            valid_cards = [c for c in soup.select(".card-outline, .card") if c.find("h3") or c.find("a")]
 
             if not valid_cards:
-                print("✅ 記事カードが見つかりません。取得終了！")
+                print("✅ これ以上記事がありません。")
                 break
 
             page_items = []
@@ -172,11 +179,7 @@ def login_and_scrape():
                     category_tag = card.find("span", class_="badge")
                     category = category_tag.get_text(strip=True) if category_tag else "お知らせ"
                     
-                    h3_tag = card.find("h3", class_="card-title")
-                    if not h3_tag:
-                        # h3がない場合、aタグの中身を探すなどフォールバック
-                        h3_tag = card.find("a")
-                    
+                    h3_tag = card.find("h3", class_="card-title") or card.find("a")
                     if not h3_tag: continue
                     full_text = h3_tag.get_text(strip=True)
                     
@@ -189,11 +192,7 @@ def login_and_scrape():
                         title = full_text.replace(category, "").strip()
 
                     footer = card.find("div", class_="card-footer")
-                    link_tag = footer.find("a") if footer else None
-                    
-                    # footerになければカード全体からリンクを探す
-                    if not link_tag:
-                        link_tag = card.find("a")
+                    link_tag = footer.find("a") if footer else card.find("a")
 
                     if link_tag:
                         url = link_tag.get("href")
@@ -207,8 +206,7 @@ def login_and_scrape():
                             "category": category,
                             "last_seen_at": current_run_time
                         })
-                except Exception as e:
-                    print(f"⚠️ 解析スキップ: {e}")
+                except:
                     continue
 
             if not page_items: break
@@ -216,7 +214,7 @@ def login_and_scrape():
             for item in page_items:
                 supabase.table("news").upsert(item, on_conflict="url").execute()
             
-            print(f"💾 Page {page}: {len(page_items)}件 保存完了")
+            print(f"💾 Page {page}: {len(page_items)}件 保存")
             total_count += len(page_items)
             page += 1
 
@@ -225,17 +223,14 @@ def login_and_scrape():
             print("🧹 古いニュースのお掃除を開始...")
             result = supabase.table("news").delete().neq("last_seen_at", current_run_time).execute()
             count = len(result.data) if result.data else 0
-            print(f"✨ お掃除完了！削除された件数: {count}")
+            print(f"✨ お掃除完了！削除数: {count}")
         else:
-            print(f"⚠️ 取得件数: {total_count}。安全のため削除はスキップします。")
+            print(f"⚠️ 取得数: {total_count}。削除スキップ。")
 
     except Exception as e:
-        print(f"❌ エラー発生: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ エラー: {e}")
     finally:
         driver.quit()
-        print("👋 ブラウザ終了")
 
 if __name__ == "__main__":
     login_and_scrape()
