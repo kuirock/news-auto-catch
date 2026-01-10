@@ -33,34 +33,36 @@ def setup_driver():
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1280,1024')
+    # ロボット検知回避
     options.add_argument('--disable-blink-features=AutomationControlled') 
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
-# ★ 新機能: DBから最新Cookieを取得
+# ★ DBから最新Cookieを取得
 def get_cookie_from_db(supabase):
     try:
+        # system_cookiesテーブルから 'portal_session' というキーを探す
         res = supabase.table('system_cookies').select('value').eq('key', 'portal_session').execute()
         if res.data and len(res.data) > 0:
             print("📦 DBから最新の自動更新Cookieが見つかりました！これを使います。")
             return res.data[0]['value']
     except Exception as e:
-        print(f"⚠️ DBからのCookie取得失敗: {e}")
+        print(f"⚠️ DBからのCookie取得失敗 (初回はなくてOK): {e}")
     return None
 
-# ★ 新機能: 最新CookieをDBに保存（わらしべ長者）
+# ★ 最新CookieをDBに保存（わらしべ長者）
 def save_cookie_to_db(driver, supabase):
     try:
         # SeleniumからCookieリストを取得
         cookies = driver.get_cookies()
-        # "key=value; key2=value2" 形式の文字列に変換
+        # 文字列に変換
         cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
         
         if not cookie_str:
-            print("⚠️ 保存するCookieがありませんでした。")
             return
 
-        # DBに保存
+        # DBに上書き保存 (Upsert)
         supabase.table('system_cookies').upsert({
             'key': 'portal_session',
             'value': cookie_str,
@@ -83,8 +85,8 @@ def inject_cookies(driver, cookie_str):
             if '=' in cookie:
                 name, value = cookie.strip().split('=', 1)
                 driver.add_cookie({
-                    'name': name,
-                    'value': value,
+                    'name': name.strip(),
+                    'value': value.strip(),
                     'domain': 'portal.do-johodai.ac.jp',
                     'path': '/'
                 })
@@ -95,13 +97,50 @@ def inject_cookies(driver, cookie_str):
         return False
 
 def perform_google_login(driver, wait):
-    # ... (前と同じログイン処理) ...
-    # ログイン成功後にもCookieを保存するチャンスがあるので、戻り値で判定
-    print("🔒 Google SSOログイン...")
-    # (中略: エラー回避のため省略しますが、前のコードの perform_google_login と同じ内容でOK)
-    # ...
-    # 最後に
-    return True
+    print("🔒 Google SSOログインプロセス開始...")
+
+    # 1. ポータルの「ログイン」ボタン
+    try:
+        portal_login_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'ログイン')] | //a[contains(text(), 'ログイン')]")))
+        print("👆 ポータルの【ログイン】ボタンをクリック！")
+        portal_login_btn.click()
+    except TimeoutException:
+        print("ℹ️ ポータルのログインボタンが見つかりません。")
+
+    # 2. メールアドレス入力
+    try:
+        print("📧 Google: メールアドレス入力待ち...")
+        email_input = wait.until(EC.visibility_of_element_located((By.XPATH, "//input[@type='email']")))
+        email_input.clear()
+        email_input.send_keys(PORTAL_ID)
+        time.sleep(0.5)
+        email_input.send_keys(Keys.RETURN)
+        print("✅ メールアドレス送信")
+    except TimeoutException:
+        print("ℹ️ メールアドレス入力欄が出ませんでした（スキップ）")
+
+    # 3. パスワード入力
+    try:
+        print("🔑 Google: パスワード入力待ち...")
+        password_input = wait.until(EC.visibility_of_element_located((By.XPATH, "//input[@type='password']")))
+        time.sleep(1)
+        password_input.clear()
+        password_input.send_keys(PORTAL_PASSWORD)
+        time.sleep(0.5)
+        password_input.send_keys(Keys.RETURN)
+        print("✅ パスワード送信")
+    except TimeoutException:
+        print("ℹ️ パスワード入力欄が出ませんでした（スキップ）")
+
+    print("⏳ ログイン処理完了待ち...")
+    time.sleep(10)
+    
+    if "login" not in driver.current_url:
+        print("🎉 ログイン成功！")
+        return True
+    else:
+        print(f"⚠️ ログイン後のURLが怪しいです: {driver.current_url}")
+        return False
 
 def login_and_scrape():
     if not SUPABASE_URL or not SUPABASE_KEY:
@@ -126,7 +165,7 @@ def login_and_scrape():
             target_cookie = PORTAL_COOKIE
 
         # Cookie注入
-        cookie_injected = inject_cookies(driver, target_cookie)
+        inject_cookies(driver, target_cookie)
         
         # サイトへアクセス
         print(f"🔗 ニュース一覧({TARGET_URL})へ移動...")
@@ -135,23 +174,114 @@ def login_and_scrape():
 
         # ログイン失敗判定
         current_url = driver.current_url
-        if "login" in current_url or "google" in current_url or "/top/" in current_url:
-            print("⚠️ Cookieが無効です。通常ログインを試みます...")
-            # ここで perform_google_login を呼ぶ (省略時は前のコード参照)
-            # ログイン成功したら...
-            pass
+        is_login_page = "login" in current_url or "google" in current_url
+        is_top_page = "/top/" in current_url 
 
-        # ★ ここで「わらしべ長者」発動！
-        # ログイン（またはCookie通過）に成功してポータル内にいるなら、最新Cookieを保存！
+        if is_login_page or is_top_page:
+            print("⚠️ Cookieログインに失敗、または有効期限切れです。")
+            
+            if not PORTAL_ID or not PORTAL_PASSWORD:
+                print("❌ ID/PASSがないため終了します。")
+                return
+
+            print("🔄 通常のログインフローを実行します...")
+            perform_google_login(driver, wait)
+            
+            print("↩️ 再度ニュース一覧へ移動...")
+            driver.get(TARGET_URL)
+            time.sleep(5)
+
+        # ★ ログイン成功したら、早速最新Cookieを保存しておく
         if "portal.do-johodai.ac.jp" in driver.current_url and "login" not in driver.current_url:
              save_cookie_to_db(driver, supabase)
 
-        # --- 2. ニュース取得ループ (変更なし) ---
-        # ... (前回のスクレイピングコードと同じ) ...
-        # ...
-        # ...
-        # (最後のfinallyの前にもう一度保存しておくと安心)
-        save_cookie_to_db(driver, supabase)
+        # --- 2. ニュース取得ループ ---
+        page = 1
+        total_count = 0
+        is_success = True
+
+        while True:
+            # ページ移動
+            if page > 1 or "articles" not in driver.current_url:
+                driver.get(f"{TARGET_URL}?page={page}")
+                time.sleep(2)
+            
+            try:
+                # 記事カードが出るまで待つ
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".card-outline, .card")))
+                time.sleep(2)
+            except TimeoutException:
+                print(f"⚠️ 記事が見つかりません (Page {page})")
+                print(f"   URL: {driver.current_url}")
+                # ログイン画面に戻されていたら終了
+                if "login" in driver.current_url:
+                    print("🚨 ログアウトされました。")
+                    is_success = False
+                break
+
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+            valid_cards = [c for c in soup.select(".card-outline, .card") if c.find("h3") or c.find("a")]
+
+            if not valid_cards:
+                print("✅ これ以上記事がありません。")
+                break
+
+            page_items = []
+            for card in valid_cards:
+                try:
+                    category_tag = card.find("span", class_="badge")
+                    category = category_tag.get_text(strip=True) if category_tag else "お知らせ"
+                    
+                    h3_tag = card.find("h3", class_="card-title") or card.find("a")
+                    if not h3_tag: continue
+                    full_text = h3_tag.get_text(strip=True)
+                    
+                    date_match = re.search(r'\[(\d{4}/\d{2}/\d{2})\]', full_text)
+                    if date_match:
+                        published_at = date_match.group(1).replace("/", "-")
+                        title = full_text.replace(category, "").replace(date_match.group(0), "").strip()
+                    else:
+                        published_at = "2026-01-01"
+                        title = full_text.replace(category, "").strip()
+
+                    footer = card.find("div", class_="card-footer")
+                    link_tag = footer.find("a") if footer else card.find("a")
+
+                    if link_tag:
+                        url = link_tag.get("href")
+                        if url and not url.startswith("http"):
+                            url = "https://portal.do-johodai.ac.jp" + url
+                        
+                        page_items.append({
+                            "published_at": published_at,
+                            "title": title,
+                            "url": url,
+                            "category": category,
+                            "last_seen_at": current_run_time
+                        })
+                except:
+                    continue
+
+            if not page_items: break
+
+            for item in page_items:
+                supabase.table("news").upsert(item, on_conflict="url").execute()
+            
+            print(f"💾 Page {page}: {len(page_items)}件 保存")
+            total_count += len(page_items)
+            page += 1
+
+        # --- 3. お掃除機能 ---
+        if is_success and total_count > 0:
+            print("🧹 古いニュースのお掃除を開始...")
+            result = supabase.table("news").delete().neq("last_seen_at", current_run_time).execute()
+            count = len(result.data) if result.data else 0
+            print(f"✨ お掃除完了！削除された件数: {count}")
+            
+            # 最後にダメ押しで最新Cookie保存
+            save_cookie_to_db(driver, supabase)
+        else:
+            print(f"⚠️ 取得数: {total_count}。削除スキップ。")
 
     except Exception as e:
         print(f"❌ エラー: {e}")
