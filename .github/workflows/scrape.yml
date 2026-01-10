@@ -27,4 +27,5 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           PORTAL_ID: ${{ secrets.PORTAL_ID }}             
           PORTAL_PASSWORD: ${{ secrets.PORTAL_PASSWORD }} 
+          PORTAL_COOKIE: ${{ secrets.PORTAL_COOKIE }}
         run: python main.py
