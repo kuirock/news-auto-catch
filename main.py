@@ -28,7 +28,7 @@ def setup_driver():
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
-    options.add_argument('--window-size=1280,1024') # 画面サイズ指定（要素が見つかりやすくなる）
+    options.add_argument('--window-size=1280,1024')
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
@@ -36,17 +36,14 @@ def setup_driver():
 def perform_login(driver, wait):
     print("🔒 ログイン画面を検知！自動ログインします...")
     try:
-        # ID入力
         username_input = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@placeholder='ユーザー名' or @name='username' or @name='j_username']")))
         username_input.clear()
         username_input.send_keys(PORTAL_ID)
         
-        # パスワード入力
         password_input = driver.find_element(By.XPATH, "//input[@placeholder='パスワード' or @name='password' or @name='j_password']")
         password_input.clear()
         password_input.send_keys(PORTAL_PASSWORD)
         
-        # ログインボタン
         try:
             login_btn = driver.find_element(By.XPATH, "//button[contains(text(), 'ログイン') or @type='submit']")
             login_btn.click()
@@ -54,7 +51,7 @@ def perform_login(driver, wait):
             password_input.submit()
         
         print("👆 ログインボタンを押しました。遷移を待ちます...")
-        time.sleep(10) # 遷移待ち
+        time.sleep(10) 
         return True
     except Exception as e:
         print(f"❌ ログイン操作中にエラー: {e}")
@@ -73,47 +70,49 @@ def login_and_scrape():
     current_run_time = datetime.now(timezone.utc).isoformat()
     
     try:
-        wait = WebDriverWait(driver, 20) # 待ち時間を20秒に延長
+        wait = WebDriverWait(driver, 20)
 
         # --- 1. アクセス & ログイン判定 ---
         print(f"🔗 ポータル({TARGET_URL})にアクセス...")
         driver.get(TARGET_URL)
-        time.sleep(3) # 初期ロード待ち
+        time.sleep(5) # 少し長めに待つ
 
-        # ログインが必要かチェック (URLまたはページ内の要素で判断)
-        # パスワード入力欄があればログイン画面とみなす
+        # ログインが必要かチェック
         is_login_page = len(driver.find_elements(By.XPATH, "//input[@type='password']")) > 0
         
         if is_login_page or "login" in driver.current_url or "sso" in driver.current_url:
             perform_login(driver, wait)
         
+        # ★ ここが修正ポイント！
+        # ログイン後にトップページ(/top/)に飛ばされていたら、もう一度記事一覧へ移動する
+        if "/top/" in driver.current_url:
+            print("↩️ トップページに転送されたため、再度ニュース一覧へ移動します...")
+            driver.get(TARGET_URL)
+            time.sleep(5)
+
         # --- 2. ニュース取得ループ ---
         page = 1
         total_count = 0
         is_success = True
 
         while True:
-            # ページ移動
-            if page > 1:
+            # ページ移動 (2ページ目以降、または1ページ目でもURLがずれてる場合)
+            if page > 1 or "articles" not in driver.current_url:
                 current_page_url = f"{TARGET_URL}?page={page}"
                 print(f"📄 Page {page} へ移動中... ({current_page_url})")
                 driver.get(current_page_url)
             
-            # ★ 重要: 記事カードが表示されるまで待つ！
             try:
-                # 記事カード(card-outline)が出るまで最大10秒待つ
+                # 記事カードが出るまで待つ
                 wait.until(EC.presence_of_element_located((By.CLASS_NAME, "card-outline")))
-                time.sleep(2) # 念のため描画安定待ち
+                time.sleep(2)
             except TimeoutException:
-                # タイムアウト＝記事がない、または読み込み失敗
                 print(f"⚠️ 待機しましたが記事が見つかりませんでした (Page {page})")
-                # デバッグ用: ページのタイトルを表示
-                print(f"   現在のページタイトル: {driver.title}")
                 print(f"   現在のURL: {driver.current_url}")
                 
-                # もしここでまたログイン画面に戻ってたらリトライすべきかも？
-                if len(driver.find_elements(By.XPATH, "//input[@type='password']")) > 0:
-                    print("🚨 ログアウトされているようです！")
+                # もしまたトップやログイン画面に戻されてたら終了
+                if "/top/" in driver.current_url or "login" in driver.current_url:
+                    print("🚨 意図しないページに遷移しています。")
                     is_success = False
                 break
 
@@ -128,25 +127,21 @@ def login_and_scrape():
             page_items = []
             for card in cards:
                 try:
-                    # カテゴリ
                     category_tag = card.find("span", class_="badge")
                     category = category_tag.get_text(strip=True) if category_tag else "お知らせ"
                     
-                    # タイトル・日付
                     h3_tag = card.find("h3", class_="card-title")
                     if not h3_tag: continue
                     full_text = h3_tag.get_text(strip=True)
                     
-                    # 日付抽出 [2024/01/01] 形式
                     date_match = re.search(r'\[(\d{4}/\d{2}/\d{2})\]', full_text)
                     if date_match:
                         published_at = date_match.group(1).replace("/", "-")
                         title = full_text.replace(category, "").replace(date_match.group(0), "").strip()
                     else:
-                        published_at = "2026-01-01" # デフォルト
+                        published_at = "2026-01-01"
                         title = full_text.replace(category, "").strip()
 
-                    # URL
                     footer = card.find("div", class_="card-footer")
                     link_tag = footer.find("a") if footer else None
                     if link_tag:
@@ -168,7 +163,6 @@ def login_and_scrape():
             if not page_items:
                 break
 
-            # DB保存
             for item in page_items:
                 supabase.table("news").upsert(item, on_conflict="url").execute()
             
@@ -177,20 +171,13 @@ def login_and_scrape():
             page += 1
 
         # --- 3. お掃除機能 ---
-        # 1件以上取得できた場合のみ実行（安全装置）
         if is_success and total_count > 0:
             print("🧹 古いニュースのお掃除を開始...")
-            # 今回の実行で「見たよ(last_seen_at更新)」とならなかったデータを削除
             result = supabase.table("news").delete().neq("last_seen_at", current_run_time).execute()
             deleted_count = len(result.data) if result.data else 0
             print(f"✨ お掃除完了！削除された件数: {deleted_count}")
-            
-            if deleted_count == 0:
-                print("   (削除対象はありませんでした)")
         else:
-            print(f"⚠️ 取得件数が {total_count}件 のため、安全のため削除処理をスキップしました。")
-            if not is_success:
-                print("   (途中でエラーが発生した可能性があります)")
+            print(f"⚠️ 取得件数が {total_count}件 のため、削除処理をスキップしました。")
 
     except Exception as e:
         print(f"❌ 全体エラー: {e}")
